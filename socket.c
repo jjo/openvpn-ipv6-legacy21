@@ -205,6 +205,10 @@ getaddr (unsigned int flags,
 	{
 	  if (h->h_addr_list[1]) /* more than one address returned */
 	    {
+#ifdef DEPRECATED_RANDOM_RESOLV
+#warning
+#warning **** DEPRECATED FEATURE ****   DEPRECATED_RANDOM_RESOLV is enabled
+#warning
 	      int n = 0;
 
 	      /* count address list */
@@ -212,12 +216,16 @@ getaddr (unsigned int flags,
 		++n;
 	      ASSERT (n >= 2);
 
-	      msg (D_RESOLVE_ERRORS, "RESOLVE: NOTE: %s resolves to %d addresses, choosing one by random",
-		   hostname,
-		   n);
+	      msg (D_RESOLVE_ERRORS, "RESOLVE: NOTE: %s resolves to %d addresses, choosing one by random."
+                   " [DEPRECATED FEATURE]", hostname, n);
 
 	      /* choose address randomly, for basic load-balancing capability */
 	      ia.s_addr = *(in_addr_t *) (h->h_addr_list[get_random () % n]);
+
+#else /* preferred solution */
+	      msg (D_RESOLVE_ERRORS, "RESOLVE: NOTE: %s resolves to more than one IP address, will "
+                   "use the first resolved address", hostname);
+#endif /* ENABLE_RANDOM_RESOLV */
 	    }
 	}
 
