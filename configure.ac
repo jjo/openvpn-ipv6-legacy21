@@ -936,6 +936,23 @@ if test -z "${htmldir}"; then
 fi
 # end workaround
 
+#
+# Deprecated features
+#
+# See http://www.secure-computing.net/wiki/index.php/OpenVPN/Developer_documentation
+# for more info about the feature deprecation process.
+#
+
+AC_ARG_ENABLE(depr-random-resolv,
+   [  --disable-depr-random-resolv   Deprecated feature: Randomization of hostname resolving when more than one IP address],
+   [DEPRECATE_RANDRESOLV="$enableval"],
+   [DEPRECATE_RANDRESOLV="yes"]
+)
+if test "$DEPRECATE_RANDRESOLV" = "yes"; then
+        AC_DEFINE(DEPRECATED_RANDOM_RESOLV, 1, [Deprecated feature: Randomization of hostname resolving when more than one IP address])
+fi
+
+
 AC_OUTPUT([
 	Makefile
 	openvpn.spec
