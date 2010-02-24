@@ -28,6 +28,7 @@
 #include "forward.h"
 #include "multi.h"
 #include "win32.h"
+#include "deprecated.h"
 
 #include "memdbg.h"
 
@@ -180,6 +181,10 @@ main (int argc, char *argv[])
 
 	  /* print version number */
 	  msg (M_INFO, "%s", title_string);
+
+          /* All deprecated features should present a warning
+             in this function, found in deprecated.c */
+	  warn_deprecated_features ();
 
 	  /* misc stuff */
 	  pre_setup (&c.options);
