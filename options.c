@@ -79,13 +79,13 @@ const char title_string[] =
 #ifdef ENABLE_EUREPHIA
   " [eurephia]"
 #endif
-  " [IPv6 payload 20100216-1]"
 #ifdef ENABLE_IP_PKTINFO
   " [MH]"
 #endif
 #ifdef USE_PF_INET6
   " [PF_INET6]"
 #endif
+  " [IPv6 payload 20100307-1]"
   " built on " __DATE__
 ;
 
