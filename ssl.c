@@ -1714,7 +1714,7 @@ init_ssl (const struct options *options)
 		{
 #ifdef ENABLE_MANAGEMENT
 		  if (management && (ERR_GET_REASON (ERR_peek_error()) == EVP_R_BAD_DECRYPT))
-		    management_auth_failure (management, UP_TYPE_PRIVATE_KEY);
+		    management_auth_failure (management, UP_TYPE_PRIVATE_KEY, NULL);
 #endif
 		  msg (M_WARN|M_SSL, "Cannot load private key file %s", options->priv_key_file);
 		  goto err;
@@ -3777,9 +3777,12 @@ key_method_2_read (struct buffer *buf, struct tls_multi *multi, struct tls_sessi
 static int
 auth_deferred_expire_window (const struct tls_options *o)
 {
-  const int hw = o->handshake_window;
+  int ret = o->handshake_window;
   const int r2 = o->renegotiate_seconds / 2;
-  return min_int (hw, r2);
+
+  if (o->renegotiate_seconds && r2 < ret)
+    ret = r2;
+  return ret;
 }
 
 /*
