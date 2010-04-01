@@ -1196,7 +1196,7 @@ create_temp_filename (const char *directory, const char *prefix, struct gc_arena
 const char *
 hostname_randomize(const char *hostname, struct gc_arena *gc)
 {
-  const int n_rnd_bytes = 6;
+# define n_rnd_bytes 6
 
   char *hst = string_alloc(hostname, gc);
   char *dot = strchr(hst, '.');
@@ -1215,6 +1215,7 @@ hostname_randomize(const char *hostname, struct gc_arena *gc)
     }
   else
     return hostname;
+# undef n_rnd_bytes
 }
 
 #else

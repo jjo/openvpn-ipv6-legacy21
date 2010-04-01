@@ -955,7 +955,6 @@ fi
 AC_OUTPUT([
 	Makefile
 	openvpn.spec
-	config-win32.h
 	images/Makefile
 	service-win32/Makefile
 	install-win32/Makefile
