@@ -38,7 +38,9 @@ MAINTAINERCLEANFILES = \
 	$(srcdir)/depcomp $(srcdir)/aclocal.m4 \
 	$(srcdir)/config.guess $(srcdir)/config.sub \
 	$(srcdir)/openvpn.spec
-CLEANFILES = openvpn.8.html
+	$(srcdir)/config-win32.h $(srcdir)/openvpn.spec
+CLEANFILES = openvpn.8.html configure.h
+
 
 EXTRA_DIST = \
 	easy-rsa \
@@ -65,7 +67,8 @@ dist_noinst_SCRIPTS = \
 	$(TESTS) \
 	doclean \
 	domake-win \
-	t_cltsrv-down.sh
+	t_cltsrv-down.sh \
+	configure_h.awk configure_log.awk
 
 dist_noinst_DATA = \
 	openvpn.spec \
@@ -141,12 +144,12 @@ openvpn_SOURCES = \
 	cryptoapi.h cryptoapi.c \
 	deprecated.h deprecated.c
 
-configure.h: Makefile
-	awk -f configure_h.awk config.h > $@
-	awk -f configure_log.awk config.log >> $@
+nodist_openvpn_SOURCES = configure.h
+options.$(OBJEXT): configure.h
 
-clean-local:
-	-rm -f configure.h
+configure.h: Makefile
+	awk -f $(srcdir)/configure_h.awk config.h > $@
+	awk -f $(srcdir)/configure_log.awk config.log >> $@
 
 dist-hook:
 	cd $(distdir) && for i in $(EXTRA_DIST) $(SUBDIRS) ; do find $$i -name .svn -type d -prune -exec rm -rf '{}' ';' ; rm -f `find $$i -type f | grep -E '(^|\/)\.?\#|\~$$|\.s?o$$'` ; done
