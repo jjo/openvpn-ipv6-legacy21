@@ -219,6 +219,8 @@ struct options
   bool tun_mtu_defined;  /* true if user overriding parm with command line option */
   bool link_mtu_defined; /* true if user overriding parm with command line option */
 
+  int proto_force;
+
   /* Advanced MTU negotiation and datagram fragmentation options */
   int mtu_discover_type; /* used if OS supports setting Path MTU discovery options on socket */
 
@@ -491,6 +493,7 @@ struct options
   const char *cert_file_inline;
   char *priv_key_file_inline;
   const char *dh_file_inline;
+  const char *pkcs12_file_inline; /* contains the base64 encoding of pkcs12 file */
 #endif
 
   int ns_cert_type; /* set to 0, NS_SSL_SERVER, or NS_SSL_CLIENT */

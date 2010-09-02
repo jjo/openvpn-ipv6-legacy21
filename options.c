@@ -112,6 +112,7 @@ static const char usage_message[] =
 #ifdef USE_PF_INET6
   "                  p = udp6, tcp6-server, or tcp6-client (ipv6)\n"
 #endif
+  "--proto-force p : only consider protocol p in list of connection profiles.\n"
   "--connect-retry n : For --proto tcp-client, number of seconds to wait\n"
   "                    between connection retries (default=%d).\n"
   "--connect-timeout n : For --proto tcp-client, connection timeout (in seconds).\n"
@@ -729,6 +730,7 @@ init_options (struct options *o, const bool init_gc)
   o->route_delay_window = 30;
   o->max_routes = MAX_ROUTES_DEFAULT;
   o->resolve_retry_seconds = RESOLV_RETRY_INFINITE;
+  o->proto_force = -1;
 #ifdef ENABLE_OCC
   o->occ = true;
 #endif
@@ -2341,6 +2343,10 @@ options_postprocess_mutate_ce (struct options *o, struct connection_entry *ce)
 
   if (!ce->bind_local)
     ce->local_port = 0;
+
+  /* if protocol forcing is enabled, disable all protocols except for the forced one */
+  if (o->proto_force >= 0 && is_proto_tcp(o->proto_force) != is_proto_tcp(ce->proto))
+    ce->flags |= CE_DISABLED;
 }
 
 static void
@@ -4567,6 +4573,19 @@ add_option (struct options *options,
 	}
       options->ce.proto = proto;
     }
+  else if (streq (p[0], "proto-force") && p[1])
+    {
+      int proto_force;
+      VERIFY_PERMISSION (OPT_P_GENERAL);
+      proto_force = ascii2proto (p[1]);
+      if (proto_force < 0)
+	{
+	  msg (msglevel, "Bad --proto-force protocol: '%s'", p[1]);
+	  goto err;
+	}
+      options->proto_force = proto_force;
+      options->force_connection_list = true;
+    }
 #ifdef GENERAL_PROXY_SUPPORT
   else if (streq (p[0], "auto-proxy"))
     {
@@ -6052,6 +6071,12 @@ add_option (struct options *options,
     {
       VERIFY_PERMISSION (OPT_P_GENERAL);
       options->pkcs12_file = p[1];
+#if ENABLE_INLINE_FILES
+      if (streq (p[1], INLINE_FILE_TAG) && p[2])
+	{
+	  options->pkcs12_file_inline = p[2];
+	}
+#endif
     }
   else if (streq (p[0], "askpass"))
     {
