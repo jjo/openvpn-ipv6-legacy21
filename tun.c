@@ -572,7 +572,7 @@ init_tun_post (struct tuntap *tt,
 }
 
 #if defined(TARGET_WIN32) || \
-    defined(TARGET_DARWIN) || defined(TARGET_NETBSD)
+    defined(TARGET_DARWIN) || defined(TARGET_NETBSD) || defined(TARGET_OPENBSD)
 
 /* some of the platforms will auto-add a "network route" pointing
  * to the interface on "ifconfig tunX 2001:db8::1/64", others need
@@ -846,7 +846,18 @@ do_ifconfig (struct tuntap *tt,
       openvpn_execve_check (&argv, es, S_FATAL, "OpenBSD ifconfig failed");
       if ( do_ipv6 )
 	{
-	  msg( M_FATAL, "can't configure IPv6 on OpenBSD yet - unimplemented" );
+	  argv_printf (&argv,
+			  "%s %s inet6 %s/%d",
+			  IFCONFIG_PATH,
+			  actual,
+			  ifconfig_ipv6_local,
+			  tt->netbits_ipv6
+			  );
+	  argv_msg (M_INFO, &argv);
+	  openvpn_execve_check (&argv, es, S_FATAL, "OpenBSD ifconfig inet6 failed");
+
+	  /* and, hooray, we explicitely need to add a route... */
+	  add_route_connected_v6_net(tt, es);
 	}
       tt->did_ifconfig = true;
 
@@ -907,7 +918,7 @@ do_ifconfig (struct tuntap *tt,
 			  tt->netbits_ipv6
 			  );
 	  argv_msg (M_INFO, &argv);
-	  openvpn_execve_check (&argv, es, S_FATAL, "NetBSD ifconfig failed");
+	  openvpn_execve_check (&argv, es, S_FATAL, "NetBSD ifconfig inet6 failed");
 
 	  /* and, hooray, we explicitely need to add a route... */
 	  add_route_connected_v6_net(tt, es);
@@ -1809,12 +1820,31 @@ open_tun (const char *dev, const char *dev_type, const char *dev_node, struct tu
     }
 }
 
+/* the current way OpenVPN handles tun devices on OpenBSD leads to
+ * lingering tunX interfaces after close -> for a full cleanup, they
+ * need to be explicitely destroyed
+ */
+
 void
 close_tun (struct tuntap* tt)
 {
   if (tt)
     {
+      struct gc_arena gc = gc_new ();
+      struct argv argv;
+
+      /* setup command, close tun dev (clears tt->actual_name!), run command
+       */
+
+      argv_init (&argv);
+      argv_printf (&argv, "%s %s destroy",
+                          IFCONFIG_PATH, tt->actual_name);
+
       close_tun_generic (tt);
+
+      argv_msg (M_INFO, &argv);
+      openvpn_execve_check (&argv, NULL, 0, "OpenBSD 'destroy tun interface' failed (non-critical)");
+
       free (tt);
     }
 }
@@ -4348,9 +4378,9 @@ open_tun (const char *dev, const char *dev_type, const char *dev_node, struct tu
      * *this* version of the driver
      */
     if ( tt->ipv6 && tt->type == DEV_TYPE_TUN &&
-         info[0] == 9 && info[1] < 7)
+         info[0] == 9 && info[1] < 8)
       {
-	msg( M_INFO, "WARNING:  Tap-Win32 driver version %d.%d does not support IPv6 in TUN mode.  IPv6 will be disabled.  Upgrade to Tap-Win32 9.7 or use TAP mode to get IPv6", (int) info[0], (int) info[1] );
+	msg( M_INFO, "WARNING:  Tap-Win32 driver version %d.%d does not support IPv6 in TUN mode.  IPv6 will be disabled.  Upgrade to Tap-Win32 9.8 (2.2-beta3 release or later) or use TAP mode to get IPv6", (int) info[0], (int) info[1] );
 	tt->ipv6 = false;
       }
   }
