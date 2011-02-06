@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2009 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -729,6 +729,12 @@ void gc_transfer (struct gc_arena *dest, struct gc_arena *src);
 
 void x_gc_free (struct gc_arena *a);
 
+static inline bool
+gc_defined (struct gc_arena *a)
+{
+  return a->list != NULL;
+}
+
 static inline void
 gc_init (struct gc_arena *a)
 {
@@ -850,8 +856,10 @@ bool buffer_list_defined (const struct buffer_list *ol);
 void buffer_list_reset (struct buffer_list *ol);
 
 void buffer_list_push (struct buffer_list *ol, const unsigned char *str);
-const struct buffer *buffer_list_peek (struct buffer_list *ol);
+struct buffer *buffer_list_peek (struct buffer_list *ol);
 void buffer_list_advance (struct buffer_list *ol, int n);
+
+void buffer_list_aggregate (struct buffer_list *bl, const size_t max);
 
 struct buffer_list *buffer_list_file (const char *fn, int max_line_len);
 

@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2009 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -117,8 +117,9 @@ static const char usage_message[] =
   "                  up is a file containing username/password on 2 lines, or\n"
   "                  'stdin' to prompt from console.  Add auth='ntlm' if\n"
   "                  the proxy requires NTLM authentication.\n"
-  "--http-proxy s p 'auto': Like the above directive, but automatically determine\n"
-  "                         auth method and query for username/password if needed.\n"
+  "--http-proxy s p 'auto[-nct]' : Like the above directive, but automatically\n"
+  "                  determine auth method and query for username/password\n"
+  "                  if needed.  auto-nct disables weak proxy auth methods.\n"
   "--http-proxy-retry     : Retry indefinitely on HTTP proxy errors.\n"
   "--http-proxy-timeout n : Proxy timeout in seconds, default=5.\n"
   "--http-proxy-option type [parm] : Set extended HTTP proxy options.\n"
@@ -204,6 +205,9 @@ static const char usage_message[] =
   "                  Add 'bypass-dns' flag to similarly bypass tunnel for DNS.\n"
   "--redirect-private [flags]: Like --redirect-gateway, but omit actually changing\n"
   "                  the default gateway.  Useful when pushing private subnets.\n"
+#ifdef ENABLE_PUSH_PEER_INFO
+  "--push-peer-info : (client only) push client info to server.\n"
+#endif
   "--setenv name value : Set a custom environmental variable to pass to script.\n"
   "--setenv FORWARD_COMPATIBLE 1 : Relax config file syntax checking to allow\n"
   "                  directives for future OpenVPN versions to be ignored.\n"
@@ -769,7 +773,9 @@ void
 uninit_options (struct options *o)
 {
   if (o->gc_owned)
-    gc_free (&o->gc);
+    {
+      gc_free (&o->gc);
+    }
 }
 
 #ifdef ENABLE_DEBUG
@@ -1354,6 +1360,9 @@ show_settings (const struct options *o)
   SHOW_INT (transition_window);
 
   SHOW_BOOL (single_session);
+#ifdef ENABLE_PUSH_PEER_INFO
+  SHOW_BOOL (push_peer_info);
+#endif
   SHOW_BOOL (tls_exit);
 
   SHOW_STR (tls_auth_file);
@@ -1416,6 +1425,137 @@ init_http_options_if_undefined (struct options *o)
       o->ce.http_proxy_options->http_version = "1.0";
     }
   return o->ce.http_proxy_options;
+}
+
+#endif
+
+#if HTTP_PROXY_FALLBACK
+
+static struct http_proxy_options *
+parse_http_proxy_override (const char *server,
+			   const char *port,
+			   const char *flags,
+			   const int msglevel,
+			   struct gc_arena *gc)
+{
+  if (server && port)
+    {
+      struct http_proxy_options *ho;
+      const int int_port = atoi(port);
+
+      if (!legal_ipv4_port (int_port))
+	{
+	  msg (msglevel, "Bad http-proxy port number: %s", port);
+	  return NULL;
+	}
+
+      ALLOC_OBJ_CLEAR_GC (ho, struct http_proxy_options, gc);
+      ho->server = string_alloc(server, gc);
+      ho->port = int_port;
+      ho->retry = true;
+      ho->timeout = 5;
+      if (flags && !strcmp(flags, "nct"))
+	ho->auth_retry = PAR_NCT;
+      else
+	ho->auth_retry = PAR_ALL;
+      ho->http_version = "1.0";
+      ho->user_agent = "OpenVPN-Autoproxy/1.0";
+      return ho;
+    }
+  else
+    return NULL;
+}
+
+struct http_proxy_options *
+parse_http_proxy_fallback (struct context *c,
+			   const char *server,
+			   const char *port,
+			   const char *flags,
+			   const int msglevel)
+{
+  struct gc_arena gc = gc_new ();  
+  struct http_proxy_options *hp = parse_http_proxy_override(server, port, flags, msglevel, &gc);
+  struct hpo_store *hpos = c->options.hpo_store;
+  if (!hpos)
+    {
+      ALLOC_OBJ_CLEAR_GC (hpos, struct hpo_store, &c->options.gc);
+      c->options.hpo_store = hpos;
+    }
+  hpos->hpo = *hp;
+  hpos->hpo.server = hpos->server;
+  strncpynt(hpos->server, hp->server, sizeof(hpos->server));
+  gc_free (&gc);
+  return &hpos->hpo;
+}
+
+static void
+http_proxy_warn(const char *name)
+{
+  msg (M_WARN, "Note: option %s ignored because no TCP-based connection profiles are defined", name);
+}
+
+void
+options_postprocess_http_proxy_fallback (struct options *o)
+{
+  struct connection_list *l = o->connection_list;
+  if (l)
+    {
+      int i;
+      for (i = 0; i < l->len; ++i)
+	{
+	  struct connection_entry *ce = l->array[i];
+	  if (ce->proto == PROTO_TCPv4_CLIENT || ce->proto == PROTO_TCPv4)
+	    {
+	      if (l->len < CONNECTION_LIST_SIZE)
+		{
+		  struct connection_entry *newce;
+		  ALLOC_OBJ_GC (newce, struct connection_entry, &o->gc);
+		  *newce = *ce;
+		  newce->flags |= CE_HTTP_PROXY_FALLBACK;
+		  newce->http_proxy_options = NULL;
+		  newce->ce_http_proxy_fallback_timestamp = 0;
+		  l->array[l->len++] = newce;
+		}
+	      return;
+	    }
+	}
+    }
+  http_proxy_warn("http-proxy-fallback");
+}
+
+void
+options_postprocess_http_proxy_override (struct options *o)
+{
+  const struct connection_list *l = o->connection_list;
+   if (l)
+    {
+      int i;
+      bool succeed = false;
+      for (i = 0; i < l->len; ++i)
+	{
+	  struct connection_entry *ce = l->array[i];
+	  if (ce->proto == PROTO_TCPv4_CLIENT || ce->proto == PROTO_TCPv4)
+	    {
+	      ce->http_proxy_options = o->http_proxy_override;
+	      succeed = true;
+	    }
+	}
+      if (succeed)
+	{
+	  for (i = 0; i < l->len; ++i)
+	    {
+	      struct connection_entry *ce = l->array[i];
+	      if (ce->proto == PROTO_UDPv4)
+		{
+		  ce->flags |= CE_DISABLED;
+		}
+	    }
+	}
+      else
+	{
+	  http_proxy_warn("http-proxy-override");
+	}
+    }
 }
 
 #endif
@@ -1983,6 +2123,9 @@ options_postprocess_verify_ce (const struct options *options, const struct conne
       MUST_BE_UNDEF (transition_window);
       MUST_BE_UNDEF (tls_auth_file);
       MUST_BE_UNDEF (single_session);
+#ifdef ENABLE_PUSH_PEER_INFO
+      MUST_BE_UNDEF (push_peer_info);
+#endif
       MUST_BE_UNDEF (tls_exit);
       MUST_BE_UNDEF (crl_file);
       MUST_BE_UNDEF (key_method);
@@ -2158,7 +2301,7 @@ options_postprocess_mutate (struct options *o)
        * For compatibility with 2.0.x, map multiple --remote options
        * into connection list (connection lists added in 2.1).
        */
-      if (o->remote_list->len > 1)
+      if (o->remote_list->len > 1 || o->force_connection_list)
 	{
 	  const struct remote_list *rl = o->remote_list;
 	  int i;
@@ -2175,7 +2318,7 @@ options_postprocess_mutate (struct options *o)
 	      *ace = ce;
 	    }
 	}
-      else if (o->remote_list->len == 1) /* one --remote option specfied */
+      else if (o->remote_list->len == 1) /* one --remote option specified */
 	{
 	  connection_entry_load_re (&o->ce, o->remote_list->array[0]);
 	}
@@ -2189,6 +2332,13 @@ options_postprocess_mutate (struct options *o)
       int i;
       for (i = 0; i < o->connection_list->len; ++i)
 	options_postprocess_mutate_ce (o, o->connection_list->array[i]);
+
+#if HTTP_PROXY_FALLBACK
+      if (o->http_proxy_override)
+	options_postprocess_http_proxy_override(o);
+      else if (o->http_proxy_fallback)
+	options_postprocess_http_proxy_fallback(o);
+#endif
     }
   else
 #endif
@@ -2809,7 +2959,7 @@ usage_version (void)
 {
   msg (M_INFO|M_NOPREFIX, "%s", title_string);
   msg (M_INFO|M_NOPREFIX, "Originally developed by James Yonan");
-  msg (M_INFO|M_NOPREFIX, "Copyright (C) 2002-2009 OpenVPN Technologies, Inc. <sales@openvpn.net>");
+  msg (M_INFO|M_NOPREFIX, "Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>");
   openvpn_exit (OPENVPN_EXIT_STATUS_USAGE); /* exit point */
 }
 
@@ -3392,6 +3542,15 @@ msglevel_forward_compatible (struct options *options, const int msglevel)
 }
 
 static void
+warn_multiple_script (const char *script, const char *type) {
+      if (script) {
+	msg (M_WARN, "Multiple --%s scripts defined.  "
+	     "The previously configured script is overridden.", type);
+      }
+}
+
+
+static void
 add_option (struct options *options,
 	    char *p[],
 	    const char *file,
@@ -3696,6 +3855,29 @@ add_option (struct options *options,
 	}
     }
 #endif
+#ifdef ENABLE_CONNECTION
+  else if (streq (p[0], "remote-ip-hint") && p[1])
+    {
+      VERIFY_PERMISSION (OPT_P_GENERAL);
+      options->remote_ip_hint = p[1];
+    }
+#endif
+#if HTTP_PROXY_FALLBACK
+  else if (streq (p[0], "http-proxy-fallback"))
+    {
+      VERIFY_PERMISSION (OPT_P_GENERAL);
+      options->http_proxy_fallback = true;
+      options->force_connection_list = true;
+    }
+  else if (streq (p[0], "http-proxy-override") && p[1] && p[2])
+    {
+      VERIFY_PERMISSION (OPT_P_GENERAL);
+      options->http_proxy_override = parse_http_proxy_override(p[1], p[2], p[3], msglevel, &options->gc);
+      if (!options->http_proxy_override)
+	goto err;
+      options->force_connection_list = true;
+    }
+#endif
   else if (streq (p[0], "remote") && p[1])
     {
       struct remote_entry re;
@@ -3768,6 +3950,7 @@ add_option (struct options *options,
       VERIFY_PERMISSION (OPT_P_SCRIPT);
       if (!no_more_than_n_args (msglevel, p, 2, NM_QUOTE_HINT))
 	goto err;
+      warn_multiple_script (options->ipchange, "ipchange");
       options->ipchange = string_substitute (p[1], ',', ' ', &options->gc);
     }
   else if (streq (p[0], "float"))
@@ -3814,6 +3997,7 @@ add_option (struct options *options,
       VERIFY_PERMISSION (OPT_P_SCRIPT);
       if (!no_more_than_n_args (msglevel, p, 2, NM_QUOTE_HINT))
 	goto err;
+      warn_multiple_script (options->up_script, "up");
       options->up_script = p[1];
     }
   else if (streq (p[0], "down") && p[1])
@@ -3821,6 +4005,7 @@ add_option (struct options *options,
       VERIFY_PERMISSION (OPT_P_SCRIPT);
       if (!no_more_than_n_args (msglevel, p, 2, NM_QUOTE_HINT))
 	goto err;
+      warn_multiple_script (options->down_script, "down");
       options->down_script = p[1];
     }
   else if (streq (p[0], "down-pre"))
@@ -3880,7 +4065,7 @@ add_option (struct options *options,
 		    {
 		      if (options->inetd != -1)
 			{
-			  msg (msglevel, opterr);
+			  msg (msglevel, "%s", opterr);
 			  goto err;
 			}
 		      else
@@ -3890,7 +4075,7 @@ add_option (struct options *options,
 		    {
 		      if (options->inetd != -1)
 			{
-			  msg (msglevel, opterr);
+			  msg (msglevel, "%s", opterr);
 			  goto err;
 			}
 		      else
@@ -3900,7 +4085,7 @@ add_option (struct options *options,
 		    {
 		      if (name != NULL)
 			{
-			  msg (msglevel, opterr);
+			  msg (msglevel, "%s", opterr);
 			  goto err;
 			}
 		      name = p[z];
@@ -4136,7 +4321,7 @@ add_option (struct options *options,
 
       VERIFY_PERMISSION (OPT_P_GENERAL|OPT_P_CONNECTION);
       port = atoi (p[1]);
-      if (!legal_ipv4_port (port))
+      if ((port != 0) && !legal_ipv4_port (port))
 	{
 	  msg (msglevel, "Bad local port number: %s", p[1]);
 	  goto err;
@@ -4256,8 +4441,13 @@ add_option (struct options *options,
 
       if (p[3])
 	{
+	  /* auto -- try to figure out proxy addr, port, and type automatically */
+	  /* semiauto -- given proxy addr:port, try to figure out type automatically */
+	  /* (auto|semiauto)-nct -- disable proxy auth cleartext protocols (i.e. basic auth) */
 	  if (streq (p[3], "auto"))
-	    ho->auth_retry = true;
+	    ho->auth_retry = PAR_ALL;
+	  else if (streq (p[3], "auto-nct"))
+	    ho->auth_retry = PAR_NCT;
 	  else
 	    {
 	      ho->auth_method_string = "basic";
@@ -4484,6 +4674,7 @@ add_option (struct options *options,
       VERIFY_PERMISSION (OPT_P_SCRIPT);
       if (!no_more_than_n_args (msglevel, p, 2, NM_QUOTE_HINT))
 	goto err;
+      warn_multiple_script (options->route_script, "route-up");
       options->route_script = p[1];
     }
   else if (streq (p[0], "route-noexec"))
@@ -4813,6 +5004,7 @@ add_option (struct options *options,
 	  msg (msglevel, "--auth-user-pass-verify requires a second parameter ('via-env' or 'via-file')");
 	  goto err;
 	}
+      warn_multiple_script (options->auth_user_pass_verify_script, "auth-user-pass-verify");
       options->auth_user_pass_verify_script = p[1];
     }
   else if (streq (p[0], "client-connect") && p[1])
@@ -4820,6 +5012,7 @@ add_option (struct options *options,
       VERIFY_PERMISSION (OPT_P_SCRIPT);
       if (!no_more_than_n_args (msglevel, p, 2, NM_QUOTE_HINT))
 	goto err;
+      warn_multiple_script (options->client_connect_script, "client-connect");
       options->client_connect_script = p[1];
     }
   else if (streq (p[0], "client-disconnect") && p[1])
@@ -4827,6 +5020,7 @@ add_option (struct options *options,
       VERIFY_PERMISSION (OPT_P_SCRIPT);
       if (!no_more_than_n_args (msglevel, p, 2, NM_QUOTE_HINT))
 	goto err;
+      warn_multiple_script (options->client_disconnect_script, "client-disconnect");
       options->client_disconnect_script = p[1];
     }
   else if (streq (p[0], "learn-address") && p[1])
@@ -4834,6 +5028,7 @@ add_option (struct options *options,
       VERIFY_PERMISSION (OPT_P_SCRIPT);
       if (!no_more_than_n_args (msglevel, p, 2, NM_QUOTE_HINT))
 	goto err;
+      warn_multiple_script (options->learn_address_script, "learn-address");
       options->learn_address_script = p[1];
     }
   else if (streq (p[0], "tmp-dir") && p[1])
@@ -5567,6 +5762,13 @@ add_option (struct options *options,
       VERIFY_PERMISSION (OPT_P_GENERAL);
       options->single_session = true;
     }
+#ifdef ENABLE_PUSH_PEER_INFO
+  else if (streq (p[0], "push-peer-info"))
+    {
+      VERIFY_PERMISSION (OPT_P_GENERAL);
+      options->push_peer_info = true;
+    }
+#endif
   else if (streq (p[0], "tls-exit"))
     {
       VERIFY_PERMISSION (OPT_P_GENERAL);
@@ -5587,6 +5789,7 @@ add_option (struct options *options,
       VERIFY_PERMISSION (OPT_P_SCRIPT);
       if (!no_more_than_n_args (msglevel, p, 2, NM_QUOTE_HINT))
 	goto err;
+      warn_multiple_script (options->tls_verify, "tls-verify");
       options->tls_verify = string_substitute (p[1], ',', ' ', &options->gc);
     }
   else if (streq (p[0], "tls-remote") && p[1])

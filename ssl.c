@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2009 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -788,9 +788,30 @@ verify_callback (int preverify_ok, X509_STORE_CTX * ctx)
 
   /* export serial number as environmental variable */
   {
-    const int serial = (int) ASN1_INTEGER_get (X509_get_serialNumber (ctx->current_cert));
-    openvpn_snprintf (envname, sizeof(envname), "tls_serial_%d", ctx->error_depth);
-    setenv_int (opt->es, envname, serial);
+    BIO *bio = NULL;
+    char serial[100];
+    int n1, n2;
+
+    CLEAR (serial);
+    if ((bio = BIO_new (BIO_s_mem ())) == NULL)
+      {
+        msg (M_WARN, "CALLBACK: Cannot create BIO (for tls_serial_%d)", ctx->error_depth);
+      }
+    else
+      {
+        /* "prints" the serial number onto the BIO and read it back */
+        if ( ! ( ( (n1 = i2a_ASN1_INTEGER(bio, X509_get_serialNumber (ctx->current_cert))) >= 0 ) &&
+                 ( (n2 = BIO_read (bio, serial, sizeof (serial)-1)) >= 0 ) &&
+                 ( n1 == n2 ) ) )
+          {
+            msg (M_WARN, "CALLBACK: Error reading/writing BIO (for tls_serial_%d)", ctx->error_depth);
+            CLEAR (serial);     /* empty string */
+          }
+
+        openvpn_snprintf (envname, sizeof(envname), "tls_serial_%d", ctx->error_depth);
+        setenv_str (opt->es, envname, serial);
+        BIO_free(bio);
+      }
   }
 
   /* export current untrusted IP */
@@ -941,10 +962,10 @@ verify_callback (int preverify_ok, X509_STORE_CTX * ctx)
 	goto end;
       }
 
-      n = sk_num(X509_CRL_get_REVOKED(crl));
+      n = sk_X509_REVOKED_num(X509_CRL_get_REVOKED(crl));
 
       for (i = 0; i < n; i++) {
-	revoked = (X509_REVOKED *)sk_value(X509_CRL_get_REVOKED(crl), i);
+	revoked = (X509_REVOKED *)sk_X509_REVOKED_value(X509_CRL_get_REVOKED(crl), i);
 	if (ASN1_INTEGER_cmp(revoked->serialNumber, X509_get_serialNumber(ctx->current_cert)) == 0) {
 	  msg (D_HANDSHAKE, "CRL CHECK FAILED: %s is REVOKED",subject);
 	  goto end;
@@ -1094,10 +1115,11 @@ key_state_gen_auth_control_file (struct key_state *ks, const struct tls_options 
   const char *acf;
 
   key_state_rm_auth_control_file (ks);
-  acf = create_temp_filename (opt->tmp_dir, "acf", &gc);
-  ks->auth_control_file = string_alloc (acf, NULL);
-  setenv_str (opt->es, "auth_control_file", ks->auth_control_file);
-
+  acf = create_temp_file (opt->tmp_dir, "acf", &gc);
+  if( acf ) {
+    ks->auth_control_file = string_alloc (acf, NULL);
+    setenv_str (opt->es, "auth_control_file", ks->auth_control_file);
+  } /* FIXME: Should have better error handling? */
   gc_free (&gc);					  
 }
 
@@ -1562,7 +1584,7 @@ init_ssl (const struct options *options)
       /* Set Certificate Verification chain */
       if (!options->ca_file)
         {
-          if (ca && sk_num(ca))
+          if (ca && sk_X509_num(ca))
             {
               for (i = 0; i < sk_X509_num(ca); i++)
                 {
@@ -1639,7 +1661,7 @@ init_ssl (const struct options *options)
 		{
 #ifdef ENABLE_MANAGEMENT
 		  if (management && (ERR_GET_REASON (ERR_peek_error()) == EVP_R_BAD_DECRYPT))
-		    management_auth_failure (management, UP_TYPE_PRIVATE_KEY);
+		    management_auth_failure (management, UP_TYPE_PRIVATE_KEY, NULL);
 #endif
 		  msg (M_WARN|M_SSL, "Cannot load private key file %s", options->priv_key_file);
 		  goto err;
@@ -2558,6 +2580,8 @@ tls_multi_free (struct tls_multi *multi, bool clear)
 
 #ifdef MANAGEMENT_DEF_AUTH
   man_def_auth_set_client_reason(multi, NULL);  
+
+  free (multi->peer_info);
 #endif
 
   if (multi->locked_cn)
@@ -3106,6 +3130,14 @@ write_string (struct buffer *buf, const char *str, const int maxlen)
 }
 
 static bool
+write_empty_string (struct buffer *buf)
+{
+  if (!buf_write_u16 (buf, 0))
+    return false;
+  return true;
+}
+
+static bool
 read_string (struct buffer *buf, char *str, const unsigned int capacity)
 {
   const int len = buf_read_u16 (buf);
@@ -3115,6 +3147,33 @@ read_string (struct buffer *buf, char *str, const unsigned int capacity)
     return false;
   str[len-1] = '\0';
   return true;
+}
+
+static char *
+read_string_alloc (struct buffer *buf)
+{
+  const int len = buf_read_u16 (buf);
+  char *str;
+
+  if (len < 1)
+    return NULL;
+  str = (char *) malloc(len);
+  check_malloc_return(str);
+  if (!buf_read (buf, str, len))
+    {
+      free (str);
+      return NULL;
+    }
+  str[len-1] = '\0';
+  return str;
+}
+
+void
+read_string_discard (struct buffer *buf)
+{
+  char *data = read_string_alloc(buf);
+  if (data)
+    free (data);
 }
 
 /*
@@ -3144,17 +3203,22 @@ verify_user_pass_script (struct tls_session *session, const struct user_pass *up
 	{
 	  struct status_output *so;
 
-	  tmp_file = create_temp_filename (session->opt->tmp_dir, "up", &gc);
-	  so = status_open (tmp_file, 0, -1, NULL, STATUS_OUTPUT_WRITE);
-	  status_printf (so, "%s", up->username);
-	  status_printf (so, "%s", up->password);
-	  if (!status_close (so))
-	    {
-	      msg (D_TLS_ERRORS, "TLS Auth Error: could not write username/password to file: %s",
-		   tmp_file);
-	      goto done;
-	    }
-	}
+	  tmp_file = create_temp_file (session->opt->tmp_dir, "up", &gc);
+          if( tmp_file ) {
+            so = status_open (tmp_file, 0, -1, NULL, STATUS_OUTPUT_WRITE);
+            status_printf (so, "%s", up->username);
+            status_printf (so, "%s", up->password);
+            if (!status_close (so))
+              {
+                msg (D_TLS_ERRORS, "TLS Auth Error: could not write username/password to file: %s",
+                     tmp_file);
+                goto done;
+              }
+          } else {
+            msg (D_TLS_ERRORS, "TLS Auth Error: could not create write "
+                 "username/password to temp file");
+          }
+        }
       else
 	{
 	  setenv_str (session->opt->es, "username", up->username);
@@ -3188,7 +3252,7 @@ verify_user_pass_script (struct tls_session *session, const struct user_pass *up
     }
 
  done:
-  if (strlen (tmp_file) > 0)
+  if (tmp_file && strlen (tmp_file) > 0)
     delete_file (tmp_file);
 
   argv_reset (&argv);
@@ -3328,6 +3392,73 @@ key_method_1_write (struct buffer *buf, struct tls_session *session)
 }
 
 static bool
+push_peer_info(struct buffer *buf, struct tls_session *session)
+{
+  struct gc_arena gc = gc_new ();
+  bool ret = false;
+
+#ifdef ENABLE_PUSH_PEER_INFO
+  if (session->opt->push_peer_info) /* write peer info */
+    {
+      struct env_set *es = session->opt->es;
+      struct env_item *e;
+      struct buffer out = alloc_buf_gc (512*3, &gc);
+
+      /* push version */
+      buf_printf (&out, "IV_VER=%s\n", PACKAGE_VERSION);
+
+      /* push platform */
+#if defined(TARGET_LINUX)
+      buf_printf (&out, "IV_PLAT=linux\n");
+#elif defined(TARGET_SOLARIS)
+      buf_printf (&out, "IV_PLAT=solaris\n");
+#elif defined(TARGET_OPENBSD)
+      buf_printf (&out, "IV_PLAT=openbsd\n");
+#elif defined(TARGET_DARWIN)
+      buf_printf (&out, "IV_PLAT=mac\n");
+#elif defined(TARGET_NETBSD)
+      buf_printf (&out, "IV_PLAT=netbsd\n");
+#elif defined(TARGET_FREEBSD)
+      buf_printf (&out, "IV_PLAT=freebsd\n");
+#elif defined(WIN32)
+      buf_printf (&out, "IV_PLAT=win\n");
+#endif
+
+      /* push mac addr */
+      {
+	bool get_default_gateway_mac_addr (unsigned char *macaddr);
+	uint8_t macaddr[6];
+	get_default_gateway_mac_addr (macaddr);
+	buf_printf (&out, "IV_HWADDR=%s\n", format_hex_ex (macaddr, 6, 0, 1, ":", &gc));
+      }
+
+      /* push env vars that begin with UV_ */
+      for (e=es->list; e != NULL; e=e->next)
+	{
+	  if (e->string)
+	    {
+	      if (!strncmp(e->string, "UV_", 3) && buf_safe(&out, strlen(e->string)+1))
+		buf_printf (&out, "%s\n", e->string);
+	    }
+	}
+
+      if (!write_string(buf, BSTR(&out), -1))
+	goto error;
+    }
+  else
+#endif
+    {
+      if (!write_empty_string (buf)) /* no peer info */
+	goto error;
+    }
+  ret = true;
+
+ error:
+  gc_free (&gc);
+  return ret;
+}
+
+static bool
 key_method_2_write (struct buffer *buf, struct tls_session *session)
 {
   ASSERT (session->opt->key_method == 2);
@@ -3361,6 +3492,16 @@ key_method_2_write (struct buffer *buf, struct tls_session *session)
 	goto error;
       purge_user_pass (&auth_user_pass, false);
     }
+  else
+    {
+      if (!write_empty_string (buf)) /* no username */
+	goto error;
+      if (!write_empty_string (buf)) /* no password */
+	goto error;
+    }
+
+  if (!push_peer_info (buf, session))
+    goto error;
 
   /*
    * generate tunnel keys if server
@@ -3507,11 +3648,13 @@ key_method_2_read (struct buffer *buf, struct tls_multi *multi, struct tls_sessi
       int s1 = OPENVPN_PLUGIN_FUNC_SUCCESS;
       bool s2 = true;
       char *raw_username;
+      bool username_status, password_status;
 
       /* get username/password from plaintext buffer */
       ALLOC_OBJ_CLEAR_GC (up, struct user_pass, &gc);
-      if (!read_string (buf, up->username, USER_PASS_LEN)
-	  || !read_string (buf, up->password, USER_PASS_LEN))
+      username_status = read_string (buf, up->username, USER_PASS_LEN);
+      password_status = read_string (buf, up->password, USER_PASS_LEN);
+      if (!username_status || !password_status)
 	{
 	  CLEAR (*up);
 	  if (!(session->opt->ssl_flags & SSLF_AUTH_USER_PASS_OPTIONAL))
@@ -3532,6 +3675,10 @@ key_method_2_read (struct buffer *buf, struct tls_multi *multi, struct tls_sessi
 
       /* call plugin(s) and/or script */
 #ifdef MANAGEMENT_DEF_AUTH
+      /* get peer info from control channel */
+      free (multi->peer_info);
+      multi->peer_info = read_string_alloc (buf);
+
       if (man_def_auth == KMDA_DEF)
 	man_def_auth = verify_user_pass_management (session, up, raw_username);
 #endif
@@ -3702,9 +3849,12 @@ key_method_2_read (struct buffer *buf, struct tls_multi *multi, struct tls_sessi
 static int
 auth_deferred_expire_window (const struct tls_options *o)
 {
-  const int hw = o->handshake_window;
+  int ret = o->handshake_window;
   const int r2 = o->renegotiate_seconds / 2;
-  return min_int (hw, r2);
+
+  if (o->renegotiate_seconds && r2 < ret)
+    ret = r2;
+  return ret;
 }
 
 /*
@@ -3744,7 +3894,8 @@ tls_process (struct tls_multi *multi,
 	   && ks->n_packets >= session->opt->renegotiate_packets)
        || (packet_id_close_to_wrapping (&ks->packet_id.send))))
     {
-      msg (D_TLS_DEBUG_LOW, "TLS: soft reset sec=%d bytes=%d/%d pkts=%d/%d",
+      msg (D_TLS_DEBUG_LOW,
+           "TLS: soft reset sec=%d bytes=" counter_format "/%d pkts=" counter_format "/%d",
 	   (int)(ks->established + session->opt->renegotiate_seconds - now),
 	   ks->n_bytes, session->opt->renegotiate_bytes,
 	   ks->n_packets, session->opt->renegotiate_packets);

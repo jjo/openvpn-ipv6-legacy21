@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2009 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -55,7 +55,7 @@ static void netsh_ifconfig (const struct tuntap_options *to,
 			    const char *flex_name,
 			    const in_addr_t ip,
 			    const in_addr_t netmask,
-			    unsigned int flags);
+			    const unsigned int flags);
 
 static const char *netsh_get_id (const char *dev_node, struct gc_arena *gc);
 
@@ -860,26 +860,15 @@ do_ifconfig (struct tuntap *tt,
 			  ifconfig_remote_netmask,
 			  tun_mtu
 			  );
-      else {
-	if (tt->topology == TOP_SUBNET)
-            argv_printf (&argv,
-                              "%s %s %s netmask %s mtu %d up",
+      else
+	argv_printf (&argv,
+		      "%s %s %s netmask %s mtu %d up",
                               IFCONFIG_PATH,
                               actual,
                               ifconfig_local,
                               ifconfig_remote_netmask,
                               tun_mtu
                               );
-	else
-  	    argv_printf (&argv,
-			  "%s %s %s netmask %s mtu %d up",
-			  IFCONFIG_PATH,
-			  actual,
-			  ifconfig_local,
-			  ifconfig_remote_netmask,
-			  tun_mtu
-			  );
-      }
 	
       argv_msg (M_INFO, &argv);
       openvpn_execve_check (&argv, es, S_FATAL, "FreeBSD ifconfig failed");

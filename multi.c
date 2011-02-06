@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2009 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -721,7 +721,7 @@ multi_print_status (struct multi_context *m, struct status_output *so, const int
 	  /*
 	   * Status file version 1
 	   */
-	  status_printf (so, PACKAGE_NAME " CLIENT LIST");
+	  status_printf (so, "OpenVPN CLIENT LIST");
 	  status_printf (so, "Updated,%s", time_string (0, 0, false, &gc_top));
 	  status_printf (so, "Common Name,Real Address,Bytes Received,Bytes Sent,Connected Since");
 	  hash_iterator_init (m->hash, &hi, true);
@@ -1530,9 +1530,14 @@ multi_connection_established (struct multi_context *m, struct multi_instance *mi
       if (plugin_defined (mi->context.plugins, OPENVPN_PLUGIN_CLIENT_CONNECT))
 	{
 	  struct argv argv = argv_new ();
-	  const char *dc_file = create_temp_filename (mi->context.options.tmp_dir, "cc", &gc);
+	  const char *dc_file = create_temp_file (mi->context.options.tmp_dir, "cc", &gc);
+
+          if( !dc_file ) {
+            cc_succeeded = false;
+            goto script_depr_failed;
+          }
+
 	  argv_printf (&argv, "%s", dc_file);
-	  delete_file (dc_file);
 	  if (plugin_call (mi->context.plugins, OPENVPN_PLUGIN_CLIENT_CONNECT, &argv, NULL, mi->context.c2.es) != OPENVPN_PLUGIN_FUNC_SUCCESS)
 	    {
 	      msg (M_WARN, "WARNING: client-connect plugin call failed");
@@ -1543,6 +1548,7 @@ multi_connection_established (struct multi_context *m, struct multi_instance *mi
 	      multi_client_connect_post (m, mi, dc_file, option_permissions_mask, &option_types_found);
 	      ++cc_succeeded_count;
 	    }
+        script_depr_failed:
 	  argv_reset (&argv);
 	}
 
@@ -1578,9 +1584,11 @@ multi_connection_established (struct multi_context *m, struct multi_instance *mi
 
 	  setenv_str (mi->context.c2.es, "script_type", "client-connect");
 
-	  dc_file = create_temp_filename (mi->context.options.tmp_dir, "cc", &gc);
-
-	  delete_file (dc_file);
+	  dc_file = create_temp_file (mi->context.options.tmp_dir, "cc", &gc);
+          if( !dc_file ) {
+            cc_succeeded = false;
+            goto script_failed;
+          }
 
 	  argv_printf (&argv, "%sc %s",
 		       mi->context.options.client_connect_script,
@@ -1593,7 +1601,7 @@ multi_connection_established (struct multi_context *m, struct multi_instance *mi
 	    }
 	  else
 	    cc_succeeded = false;
-
+        script_failed:
 	  argv_reset (&argv);
 	}
 
@@ -2597,6 +2605,20 @@ management_client_auth (void *arg,
     buffer_list_free (cc_config);
   return ret;
 }
+
+static char *
+management_get_peer_info (void *arg, const unsigned long cid)
+{
+  struct multi_context *m = (struct multi_context *) arg;
+  struct multi_instance *mi = lookup_by_cid (m, cid);
+  char *ret = NULL;
+
+  if (mi)
+      ret = tls_get_peer_info (mi->context.c2.tls_multi);
+
+  return ret;
+}
+
 #endif
 
 #ifdef MANAGEMENT_PF
@@ -2637,6 +2659,7 @@ init_management_callback_multi (struct multi_context *m)
 #ifdef MANAGEMENT_DEF_AUTH
       cb.kill_by_cid = management_kill_by_cid;
       cb.client_auth = management_client_auth;
+      cb.get_peer_info = management_get_peer_info;
 #endif
 #ifdef MANAGEMENT_PF
       cb.client_pf = management_client_pf;

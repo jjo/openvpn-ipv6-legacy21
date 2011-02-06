@@ -5,7 +5,7 @@
 #             packet encryption, packet authentication, and
 #             packet compression.
 #
-#  Copyright (C) 2002-2009 OpenVPN Technologies, Inc. <sales@openvpn.net>
+#  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
 #
 #  This program is free software; you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License version 2
@@ -36,7 +36,7 @@ MAINTAINERCLEANFILES = \
 	$(srcdir)/install-sh $(srcdir)/ltmain.sh $(srcdir)/missing \
 	$(srcdir)/depcomp $(srcdir)/aclocal.m4 \
 	$(srcdir)/config.guess $(srcdir)/config.sub \
-	$(srcdir)/config-win32.h $(srcdir)/openvpn.spec
+	$(srcdir)/openvpn.spec
 CLEANFILES = openvpn.8.html
 
 EXTRA_DIST = \
@@ -55,11 +55,10 @@ SUBDIRS = \
 	service-win32 \
 	install-win32
 
-TESTS = t_lpback.sh t_cltsrv.sh
+TESTS = t_client.sh t_lpback.sh t_cltsrv.sh
 sbin_PROGRAMS = openvpn
 
-dist_noinst_HEADERS = \
-	config-win32.h
+dist_noinst_HEADERS =
 
 dist_noinst_SCRIPTS = \
 	$(TESTS) \
@@ -89,6 +88,7 @@ openvpn_SOURCES = \
 	fragment.c fragment.h \
 	gremlin.c gremlin.h \
 	helper.c helper.h \
+	httpdigest.c httpdigest.h \
 	lladdr.c lladdr.h \
 	init.c init.h \
 	integer.h \

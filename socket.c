@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2009 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -217,12 +217,11 @@ getaddr (unsigned int flags,
 		++n;
 	      ASSERT (n >= 2);
 
-	      msg (D_RESOLVE_ERRORS, "RESOLVE: NOTE: %s resolves to %d addresses, choosing one by random",
+	      msg (D_RESOLVE_ERRORS, "RESOLVE: NOTE: %s resolves to %d addresses, choosing the first resolved IP address",
 		   hostname,
 		   n);
 
-	      /* choose address randomly, for basic load-balancing capability */
-	      ia.s_addr = *(in_addr_t *) (h->h_addr_list[get_random () % n]);
+	      ia.s_addr = *(in_addr_t *) (h->h_addr_list[0]);
 	    }
 	}
 
@@ -719,7 +718,7 @@ socket_set_buffers (int fd, const struct socket_buffer_size *sbs)
 static bool
 socket_set_tcp_nodelay (int sd, int state)
 {
-#if defined(HAVE_SETSOCKOPT) && defined(IPPROTO_TCP) && defined(TCP_NODELAY)
+#if defined(WIN32) || (defined(HAVE_SETSOCKOPT) && defined(IPPROTO_TCP) && defined(TCP_NODELAY))
   if (setsockopt (sd, IPPROTO_TCP, TCP_NODELAY, (void *) &state, sizeof (state)) != 0)
     {
       msg (M_WARN, "NOTE: setsockopt TCP_NODELAY=%d failed", state);
@@ -1684,6 +1683,10 @@ link_socket_init_phase1 (struct link_socket *sock,
   else if (mode != LS_MODE_TCP_ACCEPT_FROM)
     {
       create_socket (sock);
+
+      /* set socket buffers based on --sndbuf and --rcvbuf options */
+      socket_set_buffers (sock->sd, &sock->socket_buffer_sizes);
+
       resolve_bind_local (sock);
       resolve_remote (sock, 1, NULL, NULL);
     }
@@ -1893,9 +1896,6 @@ link_socket_init_phase2 (struct link_socket *sock,
 	  addr_copy_host(&sock->info.lsa->remote, &sock->info.lsa->actual.dest);
 	}
     }
-
-  /* set socket buffers based on --sndbuf and --rcvbuf options */
-  socket_set_buffers (sock->sd, &sock->socket_buffer_sizes);
 
   /* set misc socket parameters */
   socket_set_flags (sock->sd, sock->sockflags);
@@ -2286,7 +2286,7 @@ stream_buf_added (struct stream_buf *sb,
 
       if (sb->len < 1 || sb->len > sb->maxlen)
 	{
-	  msg (M_WARN, "WARNING: Bad encapsulated packet length from peer (%d), which must be > 0 and <= %d -- please ensure that --tun-mtu or --link-mtu is equal on both peers -- this condition could also indicate a possible active attack on the TCP link -- [Attemping restart...]", sb->len, sb->maxlen);
+	  msg (M_WARN, "WARNING: Bad encapsulated packet length from peer (%d), which must be > 0 and <= %d -- please ensure that --tun-mtu or --link-mtu is equal on both peers -- this condition could also indicate a possible active attack on the TCP link -- [Attempting restart...]", sb->len, sb->maxlen);
 	  stream_buf_reset (sb);
 	  sb->error = true;
 	  return false;
@@ -2436,6 +2436,7 @@ print_link_socket_actual_ex (const struct link_socket_actual *act,
 		{
 		  struct openvpn_sockaddr sa;
 		  CLEAR (sa);
+		  sa.addr.in4.sin_family = AF_INET;
 		  sa.addr.in4.sin_addr = act->pi.in4.ipi_spec_dst;
 		  buf_printf (&out, " (via %s)", print_sockaddr_ex (&sa, separator, 0, gc));
 		}
@@ -2779,7 +2780,7 @@ link_socket_read_tcp (struct link_socket *sock,
 struct openvpn_in4_pktinfo
 {
   struct cmsghdr cmsghdr;
-  struct in_pktinfo pi;
+  struct in_pktinfo pi4;
 };
 #ifdef USE_PF_INET6
 struct openvpn_in6_pktinfo
@@ -2790,9 +2791,9 @@ struct openvpn_in6_pktinfo
 #endif
 
 union openvpn_pktinfo {
-	struct openvpn_in4_pktinfo cmsgpi;
+	struct openvpn_in4_pktinfo msgpi4;
 #ifdef USE_PF_INET6
-	struct openvpn_in6_pktinfo cmsgpi6;
+	struct openvpn_in6_pktinfo msgpi6;
 #endif
 };
 #pragma pack()
@@ -2815,7 +2816,7 @@ link_socket_read_udp_posix_recvmsg (struct link_socket *sock,
   mesg.msg_name = &from->dest.addr;
   mesg.msg_namelen = fromlen;
   mesg.msg_control = &opi;
-  mesg.msg_controllen = sizeof (opi);
+  mesg.msg_controllen = sizeof opi;
   buf->len = recvmsg (sock->sd, &mesg, 0);
   if (buf->len >= 0)
     {
@@ -2826,7 +2827,7 @@ link_socket_read_udp_posix_recvmsg (struct link_socket *sock,
 	  && CMSG_NXTHDR (&mesg, cmsg) == NULL
 	  && cmsg->cmsg_level == SOL_IP 
 	  && cmsg->cmsg_type == IP_PKTINFO
-	  && cmsg->cmsg_len >= sizeof (opi))
+	  && cmsg->cmsg_len >= sizeof (struct openvpn_in4_pktinfo))
 	{
 	  struct in_pktinfo *pkti = (struct in_pktinfo *) CMSG_DATA (cmsg);
 	  from->pi.in4.ipi_ifindex = pkti->ipi_ifindex;
@@ -2914,15 +2915,15 @@ link_socket_write_udp_posix_sendmsg (struct link_socket *sock,
     {
     case AF_INET:
       {
-        struct openvpn_in4_pktinfo opi;
+        struct openvpn_in4_pktinfo msgpi4;
         struct in_pktinfo *pkti;
         mesg.msg_name = &to->dest.addr.sa;
         mesg.msg_namelen = sizeof (struct sockaddr_in);
-        mesg.msg_control = &opi;
-        mesg.msg_controllen = sizeof (opi);
+        mesg.msg_control = &msgpi4;
+        mesg.msg_controllen = sizeof msgpi4;
         mesg.msg_flags = 0;
         cmsg = CMSG_FIRSTHDR (&mesg);
-        cmsg->cmsg_len = sizeof (opi);
+        cmsg->cmsg_len = sizeof (struct openvpn_in4_pktinfo);
         cmsg->cmsg_level = SOL_IP;
         cmsg->cmsg_type = IP_PKTINFO;
         pkti = (struct in_pktinfo *) CMSG_DATA (cmsg);
@@ -2934,15 +2935,15 @@ link_socket_write_udp_posix_sendmsg (struct link_socket *sock,
 #ifdef USE_PF_INET6
     case AF_INET6:
       {
-        struct openvpn_in6_pktinfo opi6;
+        struct openvpn_in6_pktinfo msgpi6;
         struct in6_pktinfo *pkti6;
         mesg.msg_name = &to->dest.addr.sa;
         mesg.msg_namelen = sizeof (struct sockaddr_in6);
-        mesg.msg_control = &opi6;
-        mesg.msg_controllen = sizeof (opi6);
+        mesg.msg_control = &msgpi6;
+        mesg.msg_controllen = sizeof msgpi6;
         mesg.msg_flags = 0;
         cmsg = CMSG_FIRSTHDR (&mesg);
-        cmsg->cmsg_len = sizeof (opi6);
+        cmsg->cmsg_len = sizeof (struct openvpn_in6_pktinfo);
         cmsg->cmsg_level = IPPROTO_IPV6;
         cmsg->cmsg_type = IPV6_PKTINFO;
         pkti6 = (struct in6_pktinfo *) CMSG_DATA (cmsg);

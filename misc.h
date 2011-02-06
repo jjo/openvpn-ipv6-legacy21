@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2009 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -218,8 +218,8 @@ long int get_random(void);
 /* return true if filename can be opened for read */
 bool test_file (const char *filename);
 
-/* create a temporary filename in directory */
-const char *create_temp_filename (const char *directory, const char *prefix, struct gc_arena *gc);
+/* create a temporary file in directory, returns the filename of the created file */
+const char *create_temp_file (const char *directory, const char *prefix, struct gc_arena *gc);
 
 /* put a directory and filename together */
 const char *gen_path (const char *directory, const char *filename, struct gc_arena *gc);
@@ -263,11 +263,16 @@ bool get_console_input (const char *prompt, const bool echo, char *input, const 
 #define GET_USER_PASS_NEED_OK       (1<<3)
 #define GET_USER_PASS_NOFATAL       (1<<4)
 #define GET_USER_PASS_NEED_STR      (1<<5)
+#define GET_USER_PASS_PREVIOUS_CREDS_FAILED (1<<6)
 
 bool get_user_pass (struct user_pass *up,
 		    const char *auth_file,
 		    const char *prefix,
 		    const unsigned int flags);
+
+void fail_user_pass (const char *prefix,
+		     const unsigned int flags,
+		     const char *reason);
 
 void purge_user_pass (struct user_pass *up, const bool force);
 

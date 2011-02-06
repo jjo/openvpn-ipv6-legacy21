@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2009 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -155,9 +155,8 @@ set_nice (int niceval)
     {
 #ifdef HAVE_NICE
       errno = 0;
-      nice (niceval);
-      if (errno != 0)
-	msg (M_WARN | M_ERRNO, "WARNING: nice %d failed", niceval);
+      if (nice (niceval) < 0 && errno != 0)
+	msg (M_WARN | M_ERRNO, "WARNING: nice %d failed: %s", niceval, strerror(errno));
       else
 	msg (M_INFO, "nice %d succeeded", niceval);
 #else
@@ -1165,25 +1164,57 @@ test_file (const char *filename)
 
 /* create a temporary filename in directory */
 const char *
-create_temp_filename (const char *directory, const char *prefix, struct gc_arena *gc)
+create_temp_file (const char *directory, const char *prefix, struct gc_arena *gc)
 {
   static unsigned int counter;
   struct buffer fname = alloc_buf_gc (256, gc);
+  int fd;
+  const char *retfname = NULL;
+  unsigned int attempts = 0;
 
-  mutex_lock_static (L_CREATE_TEMP);
-  ++counter;
-  mutex_unlock_static (L_CREATE_TEMP);
+  do
+    {
+      uint8_t rndbytes[16];
+      const char *rndstr;
 
-  {
-    uint8_t rndbytes[16];
-    const char *rndstr;
+      ++attempts;
+      mutex_lock_static (L_CREATE_TEMP);
+      ++counter;
+      mutex_unlock_static (L_CREATE_TEMP);
 
-    prng_bytes (rndbytes, sizeof (rndbytes));
-    rndstr = format_hex_ex (rndbytes, sizeof (rndbytes), 40, 0, NULL, gc);
-    buf_printf (&fname, PACKAGE "_%s_%s.tmp", prefix, rndstr);
-  }
+      prng_bytes (rndbytes, sizeof rndbytes);
+      rndstr = format_hex_ex (rndbytes, sizeof rndbytes, 40, 0, NULL, gc);
+      buf_printf (&fname, PACKAGE "_%s_%s.tmp", prefix, rndstr);
 
-  return gen_path (directory, BSTR (&fname), gc);
+      retfname = gen_path (directory, BSTR (&fname), gc);
+      if (!retfname)
+        {
+          msg (M_FATAL, "Failed to create temporary filename and path");
+          return NULL;
+        }
+
+      /* Atomically create the file.  Errors out if the file already
+         exists.  */
+      fd = open (retfname, O_CREAT | O_EXCL | O_WRONLY, S_IRUSR | S_IWUSR);
+      if (fd != -1)
+        {
+          close (fd);
+          return retfname;
+        }
+      else if (fd == -1 && errno != EEXIST)
+        {
+          /* Something else went wrong, no need to retry.  */
+          struct gc_arena gcerr = gc_new ();
+          msg (M_FATAL, "Could not create temporary file '%s': %s",
+               retfname, strerror_ts (errno, &gcerr));
+          gc_free (&gcerr);
+          return NULL;
+        }
+    }
+  while (attempts < 6);
+
+  msg (M_FATAL, "Failed to create temporary file after %i attempts", attempts);
+  return NULL;
 }
 
 /*
@@ -1194,7 +1225,7 @@ create_temp_filename (const char *directory, const char *prefix, struct gc_arena
 const char *
 hostname_randomize(const char *hostname, struct gc_arena *gc)
 {
-  const int n_rnd_bytes = 6;
+# define n_rnd_bytes 6
 
   char *hst = string_alloc(hostname, gc);
   char *dot = strchr(hst, '.');
@@ -1213,6 +1244,7 @@ hostname_randomize(const char *hostname, struct gc_arena *gc)
     }
   else
     return hostname;
+# undef n_rnd_bytes
 }
 
 #else
@@ -1373,6 +1405,9 @@ get_user_pass (struct user_pass *up,
     {
       const bool from_stdin = (!auth_file || !strcmp (auth_file, "stdin"));
 
+      if (flags & GET_USER_PASS_PREVIOUS_CREDS_FAILED)
+	msg (M_WARN, "Note: previous '%s' credentials failed", prefix);
+
 #ifdef ENABLE_MANAGEMENT
       /*
        * Get username/password from standard input?
@@ -1381,6 +1416,9 @@ get_user_pass (struct user_pass *up,
 	  && ((auth_file && streq (auth_file, "management")) || (from_stdin && (flags & GET_USER_PASS_MANAGEMENT)))
 	  && management_query_user_pass_enabled (management))
 	{
+	  if (flags & GET_USER_PASS_PREVIOUS_CREDS_FAILED)
+	    management_auth_failure (management, prefix, "previous auth credentials failed");
+
 	  if (!management_query_user_pass (management, up, prefix, flags))
 	    {
 	      if ((flags & GET_USER_PASS_NOFATAL) != 0)
@@ -1555,14 +1593,16 @@ void
 purge_user_pass (struct user_pass *up, const bool force)
 {
   const bool nocache = up->nocache;
+  static bool warn_shown = false;
   if (nocache || force)
     {
       CLEAR (*up);
       up->nocache = nocache;
     }
-  else
+  else if (!warn_shown)
     {
       msg (M_WARN, "WARNING: this configuration may cache passwords in memory -- use the auth-nocache option to prevent this");
+      warn_shown = true;
     }
 }
 

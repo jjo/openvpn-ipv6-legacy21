@@ -5,7 +5,7 @@
  *             packet encryption, packet authentication, and
  *             packet compression.
  *
- *  Copyright (C) 2002-2009 OpenVPN Technologies, Inc. <sales@openvpn.net>
+ *  Copyright (C) 2002-2010 OpenVPN Technologies, Inc. <sales@openvpn.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -2196,7 +2196,7 @@ get_bypass_addresses (struct route_bypass *rb, const unsigned int flags)  /* PLA
 
 #endif
 
-#if AUTO_USERID
+#if AUTO_USERID || defined(ENABLE_PUSH_PEER_INFO)
 
 #if defined(TARGET_LINUX)
 
