@@ -378,7 +378,13 @@ block.  The effect would be as if
 were declared in all
 .B <connection>
 blocks below it.
-
+.\"*********************************************************
+.TP
+.B --proto-force p
+When iterating through connection profiles,
+only consider profiles using protocol
+.B p
+('tcp'|'udp'). 
 .\"*********************************************************
 .TP
 .B \-\-remote-random
@@ -4289,6 +4295,13 @@ or common name equal to
 The remote host must also pass all other tests
 of verification.
 
+.B NOTE:
+Because tls-remote may test against a common name prefix,
+only use this option when you are using OpenVPN with a custom CA
+certificate that is under your control.
+Never use this option when your client certificates are signed by
+a third party, such as a commercial web CA.
+
 Name can also be a common name prefix, for example if you
 want a client to only accept connections to "Server-1",
 "Server-2", etc., you can simply use
@@ -4758,6 +4771,13 @@ Ask Windows to release the TAP adapter lease on shutdown.
 This option has the same caveats as
 .B \-\-dhcp-renew
 above.
+.\"*********************************************************
+.TP
+.B --register-dns
+Run net stop dnscache, net start dnscache, ipconfig /flushdns
+and ipconfig /registerdns on connection initiation.
+This is known to kick Windows into
+recognizing pushed DNS servers.
 .\"*********************************************************
 .TP
 .B \-\-pause-exit

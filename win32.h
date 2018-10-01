@@ -33,6 +33,8 @@
 #define DEFAULT_WIN_SYS_PATH  "C:\\WINDOWS" /* --win-sys default value */
 #define NETSH_PATH_SUFFIX     "\\system32\\netsh.exe"
 #define WIN_ROUTE_PATH_SUFFIX "\\system32\\route.exe"
+#define WIN_IPCONFIG_PATH_SUFFIX "\\system32\\ipconfig.exe"
+#define WIN_NET_PATH_SUFFIX "\\system32\\net.exe"
 
 /*
  * Win32-specific OpenVPN code, targetted at the mingw

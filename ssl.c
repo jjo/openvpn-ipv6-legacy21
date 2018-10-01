@@ -1536,23 +1536,41 @@ init_ssl (const struct options *options)
 
   if (options->pkcs12_file)
     {
-    /* Use PKCS #12 file for key, cert and CA certs */
+      /* Use PKCS #12 file for key, cert and CA certs */
 
       FILE *fp;
       EVP_PKEY *pkey;
       X509 *cert;
       STACK_OF(X509) *ca = NULL;
-      PKCS12 *p12;
+      PKCS12 *p12=NULL;
       int i;
       char password[256];
 
-      /* Load the PKCS #12 file */
-      if (!(fp = fopen(options->pkcs12_file, "rb")))
-        msg (M_SSLERR, "Error opening file %s", options->pkcs12_file);
-      p12 = d2i_PKCS12_fp(fp, NULL);
-      fclose (fp);
-      if (!p12) msg (M_SSLERR, "Error reading PKCS#12 file %s", options->pkcs12_file);
-      
+#if ENABLE_INLINE_FILES
+      if (!strcmp (options->pkcs12_file, INLINE_FILE_TAG) && options->pkcs12_file_inline)
+	{
+	  BIO *b64 = BIO_new (BIO_f_base64());
+	  BIO *bio = BIO_new_mem_buf ((void *)options->pkcs12_file_inline, (int)strlen(options->pkcs12_file_inline));
+	  ASSERT(b64 && bio);
+	  BIO_push (b64, bio);
+	  p12 = d2i_PKCS12_bio(b64, NULL);
+	  if (!p12)
+	    msg (M_SSLERR, "Error reading inline PKCS#12 file");
+	  BIO_free (b64);
+	  BIO_free (bio);
+	}
+      else
+#endif
+	{
+	  /* Load the PKCS #12 file */
+	  if (!(fp = fopen(options->pkcs12_file, "rb")))
+	    msg (M_SSLERR, "Error opening file %s", options->pkcs12_file);
+	  p12 = d2i_PKCS12_fp(fp, NULL);
+	  fclose (fp);
+	  if (!p12)
+	    msg (M_SSLERR, "Error reading PKCS#12 file %s", options->pkcs12_file);
+	}
+
       /* Parse the PKCS #12 file */
       if (!PKCS12_parse(p12, "", &pkey, &cert, &ca))
         {
@@ -1561,8 +1579,12 @@ init_ssl (const struct options *options)
           ca = NULL;
           if (!PKCS12_parse(p12, password, &pkey, &cert, &ca))
 	    {
+#ifdef ENABLE_MANAGEMENT
+	      if (management && (ERR_GET_REASON (ERR_peek_error()) == PKCS12_R_MAC_VERIFY_FAILURE))
+		management_auth_failure (management, UP_TYPE_PRIVATE_KEY, NULL);
+#endif
 	      PKCS12_free(p12);
-	      msg (M_WARN|M_SSL, "Error parsing PKCS#12 file %s", options->pkcs12_file);
+	      msg (M_INFO, "OpenSSL ERROR code: %d", (ERR_GET_REASON (ERR_peek_error()))); // fixme
 	      goto err;
 	    }
         }
@@ -2288,6 +2310,7 @@ key_state_free (struct key_state *ks, bool clear)
   free_buf (&ks->plaintext_read_buf);
   free_buf (&ks->plaintext_write_buf);
   free_buf (&ks->ack_write_buf);
+  buffer_list_free(ks->paybuf);
 
   if (ks->send_reliable)
     {
@@ -3084,6 +3107,17 @@ key_source2_read (struct key_source2 *k2,
     return 0;
 
   return 1;
+}
+
+static void
+flush_payload_buffer (struct tls_multi *multi, struct key_state *ks)
+{
+  struct buffer *b;
+  while ((b = buffer_list_peek (ks->paybuf)))
+    {
+      key_state_write_plaintext_const (multi, ks, b->data, b->len);
+      buffer_list_pop (ks->paybuf);
+    }
 }
 
 /*
@@ -4005,6 +4039,9 @@ tls_process (struct tls_multi *multi,
 
 		  /* Set outgoing address for data channel packets */
 		  link_socket_set_outgoing_addr (NULL, to_link_socket_info, &ks->remote_addr, session->common_name, session->opt->es);
+
+		  /* Flush any payload packets that were buffered before our state transitioned to S_ACTIVE */
+		  flush_payload_buffer (multi, ks);
 
 #ifdef MEASURE_TLS_HANDSHAKE_STATS
 		  show_tls_performance_stats();
@@ -5104,6 +5141,13 @@ tls_send_payload (struct tls_multi *multi,
     {
       if (key_state_write_plaintext_const (multi, ks, data, size) == 1)
 	ret = true;
+    }
+  else
+    {
+      if (!ks->paybuf)
+	ks->paybuf = buffer_list_new (0);
+      buffer_list_push_data (ks->paybuf, data, (size_t)size);
+      ret = true;
     }
 
   ERR_clear_error ();

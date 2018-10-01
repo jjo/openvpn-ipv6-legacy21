@@ -100,6 +100,7 @@ static const char usage_message[] =
   "--mode m        : Major mode, m = 'p2p' (default, point-to-point) or 'server'.\n"
   "--proto p       : Use protocol p for communicating with peer.\n"
   "                  p = udp (default), tcp-server, or tcp-client\n"
+  "--proto-force p : only consider protocol p in list of connection profiles.\n"
 #ifdef USE_PF_INET6
   "                  p = udp6, tcp6-server, or tcp6-client (ipv6)\n"
 #endif
@@ -624,6 +625,8 @@ static const char usage_message[] =
   "--dhcp-pre-release : Ask Windows to release the previous TAP adapter lease on\n"
 "                       startup.\n"
   "--dhcp-release     : Ask Windows to release the TAP adapter lease on shutdown.\n"
+  "--register-dns  : Run net stop dnscache, net start dnscache, ipconfig /flushdns\n"
+  "                  and ipconfig /registerdns on connection initiation.\n"
   "--tap-sleep n   : Sleep for n seconds after TAP adapter open before\n"
   "                  attempting to set adapter properties.\n"
   "--pause-exit         : When run from a console window, pause before exiting.\n"
@@ -700,6 +703,7 @@ init_options (struct options *o, const bool init_gc)
   o->route_delay_window = 30;
   o->max_routes = MAX_ROUTES_DEFAULT;
   o->resolve_retry_seconds = RESOLV_RETRY_INFINITE;
+  o->proto_force = -1;
 #ifdef ENABLE_OCC
   o->occ = true;
 #endif
@@ -1473,19 +1477,24 @@ parse_http_proxy_fallback (struct context *c,
 			   const char *flags,
 			   const int msglevel)
 {
-  struct gc_arena gc = gc_new ();  
+  struct gc_arena gc = gc_new ();
+  struct http_proxy_options *ret = NULL;
   struct http_proxy_options *hp = parse_http_proxy_override(server, port, flags, msglevel, &gc);
-  struct hpo_store *hpos = c->options.hpo_store;
-  if (!hpos)
+  if (hp)
     {
-      ALLOC_OBJ_CLEAR_GC (hpos, struct hpo_store, &c->options.gc);
-      c->options.hpo_store = hpos;
+      struct hpo_store *hpos = c->options.hpo_store;
+      if (!hpos)
+	{
+	  ALLOC_OBJ_CLEAR_GC (hpos, struct hpo_store, &c->options.gc);
+	  c->options.hpo_store = hpos;
+	}
+      hpos->hpo = *hp;
+      hpos->hpo.server = hpos->server;
+      strncpynt(hpos->server, hp->server, sizeof(hpos->server));
+      ret = &hpos->hpo;
     }
-  hpos->hpo = *hp;
-  hpos->hpo.server = hpos->server;
-  strncpynt(hpos->server, hp->server, sizeof(hpos->server));
   gc_free (&gc);
-  return &hpos->hpo;
+  return ret;
 }
 
 static void
@@ -2186,6 +2195,10 @@ options_postprocess_mutate_ce (struct options *o, struct connection_entry *ce)
 
   if (!ce->bind_local)
     ce->local_port = 0;
+
+  /* if protocol forcing is enabled, disable all protocols except for the forced one */
+  if (o->proto_force >= 0 && is_proto_tcp(o->proto_force) != is_proto_tcp(ce->proto))
+    ce->flags |= CE_DISABLED;
 }
 
 static void
@@ -4380,6 +4393,19 @@ add_option (struct options *options,
 	}
       options->ce.proto = proto;
     }
+  else if (streq (p[0], "proto-force") && p[1])
+    {
+      int proto_force;
+      VERIFY_PERMISSION (OPT_P_GENERAL);
+      proto_force = ascii2proto (p[1]);
+      if (proto_force < 0)
+	{
+	  msg (msglevel, "Bad --proto-force protocol: '%s'", p[1]);
+	  goto err;
+	}
+      options->proto_force = proto_force;
+      options->force_connection_list = true;
+    }
 #ifdef GENERAL_PROXY_SUPPORT
   else if (streq (p[0], "auto-proxy"))
     {
@@ -5364,7 +5390,7 @@ add_option (struct options *options,
       VERIFY_PERMISSION (OPT_P_IPWIN32);
       options->tuntap_options.dhcp_release = true;
     }
-  else if (streq (p[0], "dhcp-rr") && p[1]) /* standalone method for internal use */
+  else if (streq (p[0], "dhcp-internal") && p[1]) /* standalone method for internal use */
     {
       unsigned int adapter_index;
       VERIFY_PERMISSION (OPT_P_GENERAL);
@@ -5375,13 +5401,26 @@ add_option (struct options *options,
 	dhcp_release_by_adapter_index (adapter_index);
       if (options->tuntap_options.dhcp_renew)
 	dhcp_renew_by_adapter_index (adapter_index);
-      openvpn_exit (OPENVPN_EXIT_STATUS_USAGE); /* exit point */
+      openvpn_exit (OPENVPN_EXIT_STATUS_GOOD); /* exit point */
+    }
+  else if (streq (p[0], "register-dns"))
+    {
+      VERIFY_PERMISSION (OPT_P_IPWIN32);
+      options->tuntap_options.register_dns = true;
+    }
+  else if (streq (p[0], "rdns-internal")) /* standalone method for internal use */
+    {
+      VERIFY_PERMISSION (OPT_P_GENERAL);
+      set_debug_level (options->verbosity, SDL_CONSTRAIN);
+      if (options->tuntap_options.register_dns)
+	ipconfig_register_dns (NULL);
+      openvpn_exit (OPENVPN_EXIT_STATUS_GOOD); /* exit point */
     }
   else if (streq (p[0], "show-valid-subnets"))
     {
       VERIFY_PERMISSION (OPT_P_GENERAL);
       show_valid_win32_tun_subnets ();
-      openvpn_exit (OPENVPN_EXIT_STATUS_USAGE); /* exit point */
+      openvpn_exit (OPENVPN_EXIT_STATUS_GOOD); /* exit point */
     }
   else if (streq (p[0], "pause-exit"))
     {
@@ -5741,6 +5780,12 @@ add_option (struct options *options,
     {
       VERIFY_PERMISSION (OPT_P_GENERAL);
       options->pkcs12_file = p[1];
+#if ENABLE_INLINE_FILES
+      if (streq (p[1], INLINE_FILE_TAG) && p[2])
+	{
+	  options->pkcs12_file_inline = p[2];
+	}
+#endif
     }
   else if (streq (p[0], "askpass"))
     {

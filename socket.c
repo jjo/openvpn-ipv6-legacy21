@@ -94,11 +94,25 @@ getaddr (unsigned int flags,
 	 bool *succeeded,
 	 volatile int *signal_received)
 {
+  return getaddr_multi (flags, hostname, resolve_retry_seconds, succeeded, signal_received, NULL);
+}
+
+in_addr_t
+getaddr_multi (unsigned int flags,
+	 const char *hostname,
+	 int resolve_retry_seconds,
+	 bool *succeeded,
+	 volatile int *signal_received,
+	 struct resolve_list *reslist)
+{
   struct in_addr ia;
   int status;
   int sigrec = 0;
   int msglevel = (flags & GETADDR_FATAL) ? M_FATAL : D_RESOLVE_ERRORS;
   struct gc_arena gc = gc_new ();
+
+  if (reslist)
+    reslist->len = 0;
 
   if (flags & GETADDR_RANDOMIZE)
     hostname = hostname_randomize(hostname, &gc);
@@ -217,11 +231,28 @@ getaddr (unsigned int flags,
 		++n;
 	      ASSERT (n >= 2);
 
-	      msg (D_RESOLVE_ERRORS, "RESOLVE: NOTE: %s resolves to %d addresses, choosing the first resolved IP address",
+	      msg (D_RESOLVE_ERRORS, "RESOLVE: NOTE: %s resolves to %d addresses",
 		   hostname,
 		   n);
 
+	      /* choose address randomly, for basic load-balancing capability */
+	      /*ia.s_addr = *(in_addr_t *) (h->h_addr_list[get_random () % n]);*/
+
+	      /* choose first address */
 	      ia.s_addr = *(in_addr_t *) (h->h_addr_list[0]);
+
+	      if (reslist)
+		{
+		  int i;
+		  for (i = 0; i < n && i < SIZE(reslist->data); ++i)
+		    {
+		      in_addr_t a = *(in_addr_t *) (h->h_addr_list[i]);
+		      if (flags & GETADDR_HOST_ORDER)
+			a = ntohl(a);
+		      reslist->data[i] = a;
+		    }
+		  reslist->len = i;
+		}
 	    }
 	}
 
@@ -2441,6 +2472,7 @@ print_link_socket_actual_ex (const struct link_socket_actual *act,
 		{
 		  struct openvpn_sockaddr sa;
 		  CLEAR (sa);
+		  sa.addr.in4.sin_family = AF_INET;
 		  sa.addr.in4.sin_addr = act->pi.in4.ipi_spec_dst;
 		  if_indextoname(act->pi.in4.ipi_ifindex, ifname);
 		  buf_printf (&out, " (via %s%%%s)",
@@ -2786,7 +2818,7 @@ link_socket_read_tcp (struct link_socket *sock,
 struct openvpn_in4_pktinfo
 {
   struct cmsghdr cmsghdr;
-  struct in_pktinfo pi;
+  struct in_pktinfo pi4;
 };
 #ifdef USE_PF_INET6
 struct openvpn_in6_pktinfo
@@ -2797,9 +2829,9 @@ struct openvpn_in6_pktinfo
 #endif
 
 union openvpn_pktinfo {
-	struct openvpn_in4_pktinfo cmsgpi;
+	struct openvpn_in4_pktinfo msgpi4;
 #ifdef USE_PF_INET6
-	struct openvpn_in6_pktinfo cmsgpi6;
+	struct openvpn_in6_pktinfo msgpi6;
 #endif
 };
 #pragma pack()
@@ -2822,7 +2854,7 @@ link_socket_read_udp_posix_recvmsg (struct link_socket *sock,
   mesg.msg_name = &from->dest.addr;
   mesg.msg_namelen = fromlen;
   mesg.msg_control = &opi;
-  mesg.msg_controllen = sizeof (opi);
+  mesg.msg_controllen = sizeof opi;
   buf->len = recvmsg (sock->sd, &mesg, 0);
   if (buf->len >= 0)
     {
@@ -2833,7 +2865,7 @@ link_socket_read_udp_posix_recvmsg (struct link_socket *sock,
 	  && CMSG_NXTHDR (&mesg, cmsg) == NULL
 	  && cmsg->cmsg_level == SOL_IP 
 	  && cmsg->cmsg_type == IP_PKTINFO
-	  && cmsg->cmsg_len >= sizeof (opi))
+	  && cmsg->cmsg_len >= sizeof (struct openvpn_in4_pktinfo))
 	{
 	  struct in_pktinfo *pkti = (struct in_pktinfo *) CMSG_DATA (cmsg);
 	  from->pi.in4.ipi_ifindex = pkti->ipi_ifindex;
@@ -2921,15 +2953,15 @@ link_socket_write_udp_posix_sendmsg (struct link_socket *sock,
     {
     case AF_INET:
       {
-        struct openvpn_in4_pktinfo opi;
+        struct openvpn_in4_pktinfo msgpi4;
         struct in_pktinfo *pkti;
         mesg.msg_name = &to->dest.addr.sa;
         mesg.msg_namelen = sizeof (struct sockaddr_in);
-        mesg.msg_control = &opi;
-        mesg.msg_controllen = sizeof (opi);
+        mesg.msg_control = &msgpi4;
+        mesg.msg_controllen = sizeof msgpi4;
         mesg.msg_flags = 0;
         cmsg = CMSG_FIRSTHDR (&mesg);
-        cmsg->cmsg_len = sizeof (opi);
+        cmsg->cmsg_len = sizeof (struct openvpn_in4_pktinfo);
         cmsg->cmsg_level = SOL_IP;
         cmsg->cmsg_type = IP_PKTINFO;
         pkti = (struct in_pktinfo *) CMSG_DATA (cmsg);
@@ -2941,15 +2973,15 @@ link_socket_write_udp_posix_sendmsg (struct link_socket *sock,
 #ifdef USE_PF_INET6
     case AF_INET6:
       {
-        struct openvpn_in6_pktinfo opi6;
+        struct openvpn_in6_pktinfo msgpi6;
         struct in6_pktinfo *pkti6;
         mesg.msg_name = &to->dest.addr.sa;
         mesg.msg_namelen = sizeof (struct sockaddr_in6);
-        mesg.msg_control = &opi6;
-        mesg.msg_controllen = sizeof (opi6);
+        mesg.msg_control = &msgpi6;
+        mesg.msg_controllen = sizeof msgpi6;
         mesg.msg_flags = 0;
         cmsg = CMSG_FIRSTHDR (&mesg);
-        cmsg->cmsg_len = sizeof (opi6);
+        cmsg->cmsg_len = sizeof (struct openvpn_in6_pktinfo);
         cmsg->cmsg_level = IPPROTO_IPV6;
         cmsg->cmsg_type = IPV6_PKTINFO;
         pkti6 = (struct in6_pktinfo *) CMSG_DATA (cmsg);
